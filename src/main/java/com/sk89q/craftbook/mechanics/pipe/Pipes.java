@@ -65,10 +65,10 @@ public class Pipes extends AbstractCraftBookMechanic {
     };
 
     // Efficient block coordinate packing
-    private static final long XZ_MASK = 0x3FFFFFFL; // 26 bits (±67M blocks)
+    private static final long XZ_MASK = 0x3FFFFFFL;
     private static final int X_SHIFT = 38;
     private static final int Z_SHIFT = 12;
-    private static final long Y_MASK = 0xFFFL;       // 12 bits (0-4095)
+    private static final long Y_MASK = 0xFFFL;
 
     private static long posKey(int x, int y, int z) {
         return ((x & XZ_MASK) << X_SHIFT) | ((z & XZ_MASK) << Z_SHIFT) | (y & Y_MASK);
@@ -78,7 +78,7 @@ public class Pipes extends AbstractCraftBookMechanic {
         return posKey(block.getX(), block.getY(), block.getZ());
     }
 
-    // NEW: Filter caching system
+    // Filter caching system
     private final Map<Location, ParsedFilters> filterCache = new ConcurrentHashMap<>();
 
     // Cache structure for parsed filters
@@ -96,16 +96,13 @@ public class Pipes extends AbstractCraftBookMechanic {
         }
 
         public boolean isStale() {
-            // Cache expires after 5 minutes for safety
             return System.currentTimeMillis() - parseTime > 300000;
         }
     }
 
     @EventHandler(priority = EventPriority.HIGH)
     public void onSignChange(SignChangeEvent event) {
-
         if(!EventUtil.passesFilter(event)) return;
-
         if(!event.getLine(1).equalsIgnoreCase("[pipe]")) return;
 
         CraftBookPlayer player = CraftBookPlugin.inst().wrapPlayer(event.getPlayer());
@@ -166,7 +163,6 @@ public class Pipes extends AbstractCraftBookMechanic {
             player.print("circuits.pipes.create");
         }
 
-        // NEW: Clear filter cache for this sign location and nearby blocks
         clearFilterCacheNearby(event.getBlock().getLocation());
     }
 
@@ -181,7 +177,7 @@ public class Pipes extends AbstractCraftBookMechanic {
         return line0.equals("bypass") || line0.equals("b");
     }
 
-    // NEW: Material-only filter helper (consistent everywhere)
+    // Material-only filter helper
     private List<ItemStack> filterByMaterialOnly(List<ItemStack> items, Set<ItemStack> allowStacks, Set<ItemStack> denyStacks) {
         Set<Material> allow = new HashSet<>();
         Set<Material> deny = new HashSet<>();
@@ -242,44 +238,45 @@ public class Pipes extends AbstractCraftBookMechanic {
         return null;
     }
 
-    private void searchNearbyPipes(Block block, Set<Long> visitedPipes, List<ItemStack> items, boolean bypassFilters) {
+    // Enhanced traversal with bypass support
+    private void searchNearbyPipes(Block block, Set<Long> visitedPipes, List<ItemStack> items, boolean bypassMode) {
         Deque<Block> searchQueue = new ArrayDeque<>();
         searchQueue.addFirst(block);
+        int hopCount = 0;
 
-        while (!searchQueue.isEmpty() && !items.isEmpty()) {
+        while (!searchQueue.isEmpty() && !items.isEmpty() && hopCount < 512) {
             Block bl = searchQueue.poll();
+            hopCount++;
 
             // Process current block if it's a functional pipe component
-            processPipeBlock(bl, items, visitedPipes);
+            processPipeBlock(bl, items, visitedPipes, bypassMode);
 
             if (!items.isEmpty()) {
                 // Use efficient directional search
                 if (!pipesDiagonal) {
-                    // 6-directional search (78% reduction in blocks checked)
                     for (BlockFace direction : PIPE_DIRECTIONS) {
                         Block adjacent = bl.getRelative(direction);
-                        if (processPipeConnection(bl, adjacent, visitedPipes, searchQueue, items, bypassFilters)) {
-                            // Early exit if no items left
-                            if (items.isEmpty()) return;
+                        if (processPipeConnection(bl, adjacent, visitedPipes, searchQueue, items, bypassMode)) {
+                            if (items.isEmpty()) {
+                                return;
+                            }
                         }
                     }
                 } else {
-                    // Optimized diagonal search - still much better than original
-                    searchDiagonalPipes(bl, visitedPipes, searchQueue, items, bypassFilters);
+                    searchDiagonalPipes(bl, visitedPipes, searchQueue, items, bypassMode);
                 }
             }
         }
     }
 
-    private boolean processPipeConnection(Block current, Block adjacent, Set<Long> visitedPipes, Deque<Block> searchQueue, List<ItemStack> items, boolean bypassFilters) {
+    private boolean processPipeConnection(Block current, Block adjacent, Set<Long> visitedPipes, Deque<Block> searchQueue, List<ItemStack> items, boolean bypassMode) {
         if (!isValidPipeBlock(adjacent)) return false;
         if (visitedPipes.contains(posKey(adjacent))) return false;
 
-        // Check for filter signs BEFORE adding to visited pipes (unless bypassing)
-        if (!bypassFilters && hasFilterSign(adjacent)) {
+        // In bypass mode, skip filter checks for traversal
+        if (!bypassMode && hasFilterSign(adjacent)) {
             List<ItemStack> filteredItems = applyPipeFiltersCached(adjacent, new ArrayList<>(items));
             if (filteredItems.isEmpty()) {
-                // No items can pass through this filter
                 return false;
             }
         }
@@ -296,10 +293,9 @@ public class Pipes extends AbstractCraftBookMechanic {
         if (adjType == Material.GLASS || ItemUtil.isStainedGlass(adjType)) {
             searchQueue.add(adjacent);
         } else if (adjType == Material.GLASS_PANE || ItemUtil.isStainedGlassPane(adjType)) {
-            // Handle glass pane connections
-            handleGlassPaneConnection(current, adjacent, visitedPipes, searchQueue, bypassFilters);
+            handleGlassPaneConnection(current, adjacent, visitedPipes, searchQueue);
         } else if (adjType == Material.PISTON) {
-            searchQueue.addFirst(adjacent); // Priority for pistons
+            searchQueue.addFirst(adjacent);
         }
 
         return true;
@@ -311,7 +307,7 @@ public class Pipes extends AbstractCraftBookMechanic {
             if (SignUtil.isSign(signBlock)) {
                 ChangedSign sign = CraftBookBukkitUtil.toChangedSign(signBlock);
                 if (sign != null && sign.getLine(1).equalsIgnoreCase("[Pipe]")) {
-                    // Check if it has filters (skip bypass signs)
+                    // Skip bypass signs when checking for filter gates
                     if (hasBypassEnabled(sign)) continue;
 
                     String line2 = sign.getLine(2).trim();
@@ -325,25 +321,22 @@ public class Pipes extends AbstractCraftBookMechanic {
         return false;
     }
 
-    // NEW: Optimized cached version that handles both existence check + filtering
+    // Optimized cached version that handles both existence check + filtering
     private List<ItemStack> applyPipeFiltersCached(Block block, List<ItemStack> items) {
         Location blockLoc = block.getLocation();
         ParsedFilters cached = filterCache.get(blockLoc);
 
-        // Check if we need to parse filters
         if (cached == null || cached.isStale()) {
             cached = parseAndCacheFilters(block);
         }
 
-        // If no filters, return all items immediately (most common case)
         if (!cached.hasFilters) {
             return items;
         }
 
-        // Apply cached filters - much faster than original
         List<ItemStack> result = new ArrayList<>();
         for (ItemStack item : items) {
-            if (passesFilterFast(item, cached)) {
+            if (passesFilterFast(item, cached.allowedTypes, cached.excludedTypes)) {
                 result.add(item);
             }
         }
@@ -351,7 +344,7 @@ public class Pipes extends AbstractCraftBookMechanic {
         return result;
     }
 
-    // NEW: Parse filters once and cache them
+    // Parse filters once and cache them
     private ParsedFilters parseAndCacheFilters(Block block) {
         Set<Material> allowed = new HashSet<>();
         Set<Material> excluded = new HashSet<>();
@@ -363,7 +356,7 @@ public class Pipes extends AbstractCraftBookMechanic {
                 if (sign != null && sign.getLine(1).equalsIgnoreCase("[Pipe]")) {
                     // Skip bypass signs when parsing filters for traversal
                     if (!hasBypassEnabled(sign)) {
-                        parseFiltersToSets(sign, allowed, excluded);
+                        parseFiltersToMaterialSets(sign, allowed, excluded);
                     }
                 }
             }
@@ -374,56 +367,101 @@ public class Pipes extends AbstractCraftBookMechanic {
         return parsed;
     }
 
-    // NEW: Parse filters directly to Material sets (faster)
-    private void parseFiltersToSets(ChangedSign sign, Set<Material> allowed, Set<Material> excluded) {
-        // Parse line 2 (allowed items)
-        for (String filterText : RegexUtil.COMMA_PATTERN.split(sign.getLine(2))) {
-            String trimmed = filterText.trim();
-            if (!trimmed.isEmpty()) {
-                ItemStack filterItem = ItemSyntax.getItem(trimmed);
-                if (filterItem != null) {
-                    allowed.add(filterItem.getType());
+    // Safe filter parsing with crash protection
+    private void parseFiltersToMaterialSets(ChangedSign sign, Set<Material> allowed, Set<Material> excluded) {
+        // Fast path: skip parsing if no filters exist
+        boolean hasFilters = !sign.getLine(2).trim().isEmpty() || !sign.getLine(3).trim().isEmpty();
+        if (!hasFilters) return;
+
+        // Parse line 2 (allowed items) with safety checks
+        String line2 = sign.getLine(2).trim();
+        if (!line2.isEmpty()) {
+            for (String token : RegexUtil.COMMA_PATTERN.split(line2)) {
+                String trimmed = token.trim();
+                if (isValidItemToken(trimmed)) {
+                    try {
+                        // CRITICAL FIX: Use Material.matchMaterial first
+                        Material mat = Material.matchMaterial(trimmed);
+                        if (mat != null) {
+                            allowed.add(mat);
+                        } else if (trimmed.contains(":") || trimmed.contains("@")) {
+                            // Only use ItemSyntax for complex cases
+                            ItemStack filterItem = ItemSyntax.getItem(trimmed);
+                            if (filterItem != null) {
+                                allowed.add(filterItem.getType());
+                            }
+                        }
+                    } catch (Exception e) {
+                        CraftBookPlugin.inst().getLogger().warning("Invalid item in pipe filter: " + trimmed);
+                    }
                 }
             }
         }
 
-        // Parse line 3 (excluded items)
-        for (String filterText : RegexUtil.COMMA_PATTERN.split(sign.getLine(3))) {
-            String trimmed = filterText.trim();
-            if (!trimmed.isEmpty()) {
-                ItemStack filterItem = ItemSyntax.getItem(trimmed);
-                if (filterItem != null) {
-                    excluded.add(filterItem.getType());
+        // Parse line 3 (excluded items) with safety checks
+        String line3 = sign.getLine(3).trim();
+        if (!line3.isEmpty()) {
+            for (String token : RegexUtil.COMMA_PATTERN.split(line3)) {
+                String trimmed = token.trim();
+                if (isValidItemToken(trimmed)) {
+                    try {
+                        // CRITICAL FIX: Use Material.matchMaterial first
+                        Material mat = Material.matchMaterial(trimmed);
+                        if (mat != null) {
+                            excluded.add(mat);
+                        } else if (trimmed.contains(":") || trimmed.contains("@")) {
+                            // Only use ItemSyntax for complex cases
+                            ItemStack filterItem = ItemSyntax.getItem(trimmed);
+                            if (filterItem != null) {
+                                excluded.add(filterItem.getType());
+                            }
+                        }
+                    } catch (Exception e) {
+                        CraftBookPlugin.inst().getLogger().warning("Invalid item in pipe filter: " + trimmed);
+                    }
                 }
             }
         }
     }
 
-    // NEW: Fast filter checking using Material sets instead of ItemStack comparison
-    private boolean passesFilterFast(ItemStack item, ParsedFilters filters) {
+    // Validate tokens before sending to ItemSyntax
+    private boolean isValidItemToken(String token) {
+        if (token == null || token.isEmpty()) return false;
+        if (token.equals("b") || token.equals("bypass")) return false;
+        if (token.length() > 50) return false;
+
+        // Skip tokens that are likely to cause legacy resolution issues
+        if (token.matches("\\d+")) return false; // Pure numbers (legacy IDs)
+        if (token.contains(" ")) return false; // Spaces cause issues
+
+        return true;
+    }
+
+    // Fast filter checking using Material sets
+    private boolean passesFilterFast(ItemStack item, Set<Material> allowed, Set<Material> excluded) {
+        if (!ItemUtil.isStackValid(item)) return false;
+
         Material type = item.getType();
 
         // Check exclusions first (faster to reject)
-        if (!filters.excludedTypes.isEmpty() && filters.excludedTypes.contains(type)) {
+        if (!excluded.isEmpty() && excluded.contains(type)) {
             return false;
         }
 
-        // Check inclusions
-        if (!filters.allowedTypes.isEmpty()) {
-            return filters.allowedTypes.contains(type);
+        // Check inclusions (if any specified)
+        if (!allowed.isEmpty()) {
+            return allowed.contains(type);
         }
 
         return true; // No filters = allow all
     }
 
-    private void handleGlassPaneConnection(Block current, Block pane, Set<Long> visitedPipes, Deque<Block> searchQueue, boolean bypassFilters) {
-        // Glass panes connect through to the next block
+    private void handleGlassPaneConnection(Block current, Block pane, Set<Long> visitedPipes, Deque<Block> searchQueue) {
         BlockFace direction = getDirectionBetween(current, pane);
         if (direction != null) {
             Block beyond = pane.getRelative(direction);
             if (isValidPipeBlock(beyond) && !visitedPipes.contains(posKey(beyond))) {
                 if (ItemUtil.isStainedGlassPane(pane.getType())) {
-                    // Check color compatibility for stained glass panes
                     if (isColorCompatible(current, pane, beyond)) {
                         visitedPipes.add(posKey(beyond));
                         searchQueue.add(beyond);
@@ -447,7 +485,6 @@ public class Pipes extends AbstractCraftBookMechanic {
     }
 
     private boolean isColorCompatible(Block current, Block pane, Block beyond) {
-        // Simplified color compatibility check
         if (!ItemUtil.isStainedGlass(current.getType()) && !ItemUtil.isStainedGlassPane(current.getType())) {
             return true;
         }
@@ -459,19 +496,17 @@ public class Pipes extends AbstractCraftBookMechanic {
                 ItemUtil.getStainedColor(pane.getType()) == ItemUtil.getStainedColor(beyond.getType());
     }
 
-    private void searchDiagonalPipes(Block bl, Set<Long> visitedPipes, Deque<Block> searchQueue, List<ItemStack> items, boolean bypassFilters) {
-        // Optimized diagonal search - only check necessary blocks
+    private void searchDiagonalPipes(Block bl, Set<Long> visitedPipes, Deque<Block> searchQueue, List<ItemStack> items, boolean bypassMode) {
         for (int x = -1; x <= 1; x++) {
             for (int y = -1; y <= 1; y++) {
                 for (int z = -1; z <= 1; z++) {
-                    if (x == 0 && y == 0 && z == 0) continue; // Skip center block
+                    if (x == 0 && y == 0 && z == 0) continue;
                     if (items.isEmpty()) return;
 
-                    // Apply insulator logic for diagonal connections
                     if (shouldSkipDiagonalConnection(bl, x, y, z)) continue;
 
                     Block adjacent = bl.getRelative(x, y, z);
-                    processPipeConnection(bl, adjacent, visitedPipes, searchQueue, items, bypassFilters);
+                    processPipeConnection(bl, adjacent, visitedPipes, searchQueue, items, bypassMode);
                 }
             }
         }
@@ -483,7 +518,6 @@ public class Pipes extends AbstractCraftBookMechanic {
         boolean yIsZ = Math.abs(y) == Math.abs(z);
 
         if (xIsY && xIsZ && yIsZ) {
-            // Triple diagonal - check all three insulator positions
             return pipeInsulator.equalsFuzzy(BukkitAdapter.adapt(bl.getRelative(x, 0, 0).getBlockData()))
                     && pipeInsulator.equalsFuzzy(BukkitAdapter.adapt(bl.getRelative(0, y, 0).getBlockData()))
                     && pipeInsulator.equalsFuzzy(BukkitAdapter.adapt(bl.getRelative(0, 0, z).getBlockData()));
@@ -501,17 +535,18 @@ public class Pipes extends AbstractCraftBookMechanic {
         return false;
     }
 
-    private void processPipeBlock(Block bl, List<ItemStack> items, Set<Long> visitedPipes) {
+    private void processPipeBlock(Block bl, List<ItemStack> items, Set<Long> visitedPipes, boolean bypassMode) {
         Material type = bl.getType();
 
         if (type == Material.PISTON) {
-            processPistonBlock(bl, items);
+            processPistonBlock(bl, items, bypassMode);
         } else if (type == Material.DROPPER) {
             processDropperBlock(bl, items);
         }
     }
 
-    private void processPistonBlock(Block bl, List<ItemStack> items) {
+    // Enhanced piston processing with pass-through logic for bypass mode
+    private void processPistonBlock(Block bl, List<ItemStack> items, boolean bypassMode) {
         Piston p = (Piston) bl.getBlockData();
         ChangedSign sign = getAttachedPipeSign(bl);
 
@@ -522,35 +557,58 @@ public class Pipes extends AbstractCraftBookMechanic {
             parseFiltersFromSign(sign, pFilters, pExceptions);
         }
 
-        // CHANGED: Use material-only filtering (consistent with cached traversal)
-        List<ItemStack> filteredItems = new ArrayList<>(VerifyUtil.withoutNulls(filterByMaterialOnly(items, pFilters, pExceptions)));
+        // In bypass mode or normal mode, pistons act as pass-through with selective extraction
+        List<ItemStack> matchingItems = new ArrayList<>();
+        List<ItemStack> passThroughItems = new ArrayList<>();
 
-        PipeFilterEvent filterEvent = new PipeFilterEvent(bl, items, pFilters, pExceptions, filteredItems);
-        Bukkit.getPluginManager().callEvent(filterEvent);
+        for (ItemStack item : items) {
+            List<ItemStack> singleItem = Collections.singletonList(item);
+            List<ItemStack> filtered = filterByMaterialOnly(singleItem, pFilters, pExceptions);
 
-        filteredItems = filterEvent.getFilteredItems();
-        if(filteredItems.isEmpty()) return;
-
-        List<ItemStack> newItems = new ArrayList<>();
-        Block fac = bl.getRelative(p.getFacing());
-
-        PipePutEvent event = new PipePutEvent(bl, new ArrayList<>(filteredItems), fac);
-        Bukkit.getPluginManager().callEvent(event);
-
-        if (!event.isCancelled()) {
-            if (InventoryUtil.doesBlockHaveInventory(fac)) {
-                // Only call getState() when we know we need it
-                InventoryHolder holder = (InventoryHolder) fac.getState();
-                newItems.addAll(InventoryUtil.addItemsToInventory(holder, event.getItems().toArray(new ItemStack[0])));
-            } else if (fac.getType() == Material.JUKEBOX) {
-                processJukeboxInteraction(fac, event.getItems(), newItems);
+            if (!filtered.isEmpty()) {
+                matchingItems.add(item);
             } else {
-                newItems.addAll(event.getItems());
+                passThroughItems.add(item);
             }
-
-            items.removeAll(filteredItems);
-            items.addAll(newItems);
         }
+
+        // Process matching items normally (try to insert into facing inventory)
+        if (!matchingItems.isEmpty()) {
+            List<ItemStack> filteredItems = new ArrayList<>(VerifyUtil.withoutNulls(filterByMaterialOnly(matchingItems, pFilters, pExceptions)));
+
+            PipeFilterEvent filterEvent = new PipeFilterEvent(bl, matchingItems, pFilters, pExceptions, filteredItems);
+            Bukkit.getPluginManager().callEvent(filterEvent);
+
+            filteredItems = filterEvent.getFilteredItems();
+            if (!filteredItems.isEmpty()) {
+                List<ItemStack> newItems = new ArrayList<>();
+                Block fac = bl.getRelative(p.getFacing());
+
+                PipePutEvent event = new PipePutEvent(bl, new ArrayList<>(filteredItems), fac);
+                Bukkit.getPluginManager().callEvent(event);
+
+                if (!event.isCancelled()) {
+                    if (InventoryUtil.doesBlockHaveInventory(fac)) {
+                        InventoryHolder holder = (InventoryHolder) fac.getState();
+                        newItems.addAll(InventoryUtil.addItemsToInventory(holder, event.getItems().toArray(new ItemStack[0])));
+                    } else if (fac.getType() == Material.JUKEBOX) {
+                        processJukeboxInteraction(fac, event.getItems(), newItems);
+                    } else {
+                        newItems.addAll(event.getItems());
+                    }
+
+                    // Items that couldn't be inserted continue as pass-through
+                    passThroughItems.addAll(newItems);
+                } else {
+                    // Event was cancelled, add back to pass-through
+                    passThroughItems.addAll(filteredItems);
+                }
+            }
+        }
+
+        // Update items list - only pass-through items continue flowing
+        items.clear();
+        items.addAll(passThroughItems);
     }
 
     private void processDropperBlock(Block bl, List<ItemStack> items) {
@@ -563,15 +621,12 @@ public class Pipes extends AbstractCraftBookMechanic {
             parseFiltersFromSign(sign, pFilters, pExceptions);
         }
 
-        // CHANGED: Use material-only filtering (consistent with cached traversal)
         List<ItemStack> filteredItems = new ArrayList<>(VerifyUtil.withoutNulls(filterByMaterialOnly(items, pFilters, pExceptions)));
         if(filteredItems.isEmpty()) return;
 
-        // Only call getState() when needed
         Dropper dropper = (Dropper) bl.getState();
         List<ItemStack> newItems = new ArrayList<>(dropper.getInventory().addItem(filteredItems.toArray(new ItemStack[0])).values());
 
-        // CHANGED: Add dropper throttling to prevent TPS spikes
         int totalItemsToDrop = 0;
         for(ItemStack stack : dropper.getInventory().getContents()) {
             if(ItemUtil.isStackValid(stack)) {
@@ -579,8 +634,7 @@ public class Pipes extends AbstractCraftBookMechanic {
             }
         }
 
-        // Cap drops per tick to prevent lag
-        int maxDropsPerTick = 64; // Could be made configurable
+        int maxDropsPerTick = 64;
         int dropsThisTick = Math.min(totalItemsToDrop, maxDropsPerTick);
 
         for(int i = 0; i < dropsThisTick; i++) {
@@ -591,31 +645,46 @@ public class Pipes extends AbstractCraftBookMechanic {
         items.addAll(newItems);
     }
 
+    // Safe filter parsing from signs with crash protection
     private void parseFiltersFromSign(ChangedSign sign, HashSet<ItemStack> pFilters, HashSet<ItemStack> pExceptions) {
-        // For bypass signs, line structure is different
-        if (hasBypassEnabled(sign)) {
-            // Line 0: bypass
-            // Line 1: [Pipe]
-            // Line 2: allowed items
-            // Line 3: excluded items
-            for(String line2 : RegexUtil.COMMA_PATTERN.split(sign.getLine(2))) {
-                pFilters.add(ItemSyntax.getItem(line2.trim()));
-            }
-            for(String line3 : RegexUtil.COMMA_PATTERN.split(sign.getLine(3))) {
-                pExceptions.add(ItemSyntax.getItem(line3.trim()));
-            }
-        } else {
-            // Normal sign structure
-            for(String line2 : RegexUtil.COMMA_PATTERN.split(sign.getLine(2))) {
-                pFilters.add(ItemSyntax.getItem(line2.trim()));
-            }
-            for(String line3 : RegexUtil.COMMA_PATTERN.split(sign.getLine(3))) {
-                pExceptions.add(ItemSyntax.getItem(line3.trim()));
+        if (sign == null) return;
+
+        // Fast path: skip parsing if no filters exist
+        boolean hasFilters = !sign.getLine(2).trim().isEmpty() || !sign.getLine(3).trim().isEmpty();
+        if (!hasFilters) return;
+
+        parseFilterLine(sign.getLine(2), pFilters);
+        parseFilterLine(sign.getLine(3), pExceptions);
+    }
+
+    // Safe helper to parse a single filter line
+    private void parseFilterLine(String line, HashSet<ItemStack> collection) {
+        String trimmed = line.trim();
+        if (trimmed.isEmpty()) return;
+
+        for (String token : RegexUtil.COMMA_PATTERN.split(trimmed)) {
+            String cleanToken = token.trim();
+            if (isValidItemToken(cleanToken)) {
+                try {
+                    // CRITICAL FIX: Use Material.matchMaterial instead of ItemSyntax.getItem
+                    Material mat = Material.matchMaterial(cleanToken);
+                    if (mat != null) {
+                        collection.add(new ItemStack(mat));
+                    } else {
+                        // Fallback: only use ItemSyntax for complex syntax (data values, etc)
+                        // but with safety checks
+                        if (cleanToken.contains(":") || cleanToken.contains("@")) {
+                            ItemStack filterItem = ItemSyntax.getItem(cleanToken);
+                            if (filterItem != null) {
+                                collection.add(filterItem);
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    CraftBookPlugin.inst().getLogger().warning("Invalid item syntax in pipe filter: " + cleanToken + " - " + e.getMessage());
+                }
             }
         }
-
-        pFilters.removeAll(Collections.<ItemStack>singleton(null));
-        pExceptions.removeAll(Collections.<ItemStack>singleton(null));
     }
 
     private void processJukeboxInteraction(Block jukebox, List<ItemStack> items, List<ItemStack> newItems) {
@@ -652,7 +721,7 @@ public class Pipes extends AbstractCraftBookMechanic {
     private void startPipe(Block block, List<ItemStack> items, boolean request, Block hopReturn) {
         // Check if this sticky piston has a bypass-enabled sign
         ChangedSign sign = getAttachedPipeSign(block);
-        boolean bypassFilters = (block.getType() == Material.STICKY_PISTON &&
+        boolean bypassMode = (block.getType() == Material.STICKY_PISTON &&
                 !request &&
                 hasBypassEnabled(sign));
 
@@ -663,9 +732,6 @@ public class Pipes extends AbstractCraftBookMechanic {
             parseFiltersFromSign(sign, filters, exceptions);
         }
 
-        filters.removeAll(Collections.<ItemStack>singleton(null));
-        exceptions.removeAll(Collections.<ItemStack>singleton(null));
-
         // To Materials
         Set<Material> allowMats = new HashSet<>();
         for (ItemStack s : filters) if (ItemUtil.isStackValid(s)) allowMats.add(s.getType());
@@ -674,9 +740,8 @@ public class Pipes extends AbstractCraftBookMechanic {
 
         Set<Long> visitedPipes = new HashSet<>();
 
-        // -------- HOP START (continue from a pipe segment) --------
+        // HOP START (continue from a pipe segment)
         if (request && isValidPipeBlock(block) && block.getType() != Material.STICKY_PISTON) {
-            // Let listeners adjust like a normal suction-at-segment
             PipeSuckEvent event = new PipeSuckEvent(block, new ArrayList<>(items), block);
             Bukkit.getPluginManager().callEvent(event);
 
@@ -688,7 +753,6 @@ public class Pipes extends AbstractCraftBookMechanic {
                 searchNearbyPipes(block, visitedPipes, items, false); // No bypass for hops
             }
 
-            // Finish and collect leftovers
             List<ItemStack> leftovers = new ArrayList<>(items);
             PipeFinishEvent fEvent = new PipeFinishEvent(block, leftovers, block, true);
             Bukkit.getPluginManager().callEvent(fEvent);
@@ -697,14 +761,12 @@ public class Pipes extends AbstractCraftBookMechanic {
             items.clear();
 
             if (!leftovers.isEmpty()) {
-                // NEW: try to return leftovers to ORIGINAL SOURCE inventory (from hop)
                 if (hopReturn != null && InventoryUtil.doesBlockHaveInventory(hopReturn)) {
                     InventoryHolder holder = (InventoryHolder) hopReturn.getState();
                     List<ItemStack> still = InventoryUtil.addItemsToInventory(holder, leftovers.toArray(new ItemStack[0]));
-                    leftovers = still; // whatever didn't fit
+                    leftovers = still;
                 }
 
-                // Last resort: drop at the **source** if we know it, otherwise at the segment
                 Block dropAt = (hopReturn != null ? hopReturn : block);
                 for (ItemStack item : leftovers) {
                     if (!ItemUtil.isStackValid(item)) continue;
@@ -713,9 +775,8 @@ public class Pipes extends AbstractCraftBookMechanic {
             }
             return;
         }
-        // ----------------------------------------------------------
 
-        // -------- ORIGINAL sticky-piston start (with bypass support) --------
+        // STICKY-PISTON start (with bypass support)
         if (block.getType() == Material.STICKY_PISTON) {
             List<ItemStack> leftovers = new ArrayList<>();
 
@@ -745,9 +806,11 @@ public class Pipes extends AbstractCraftBookMechanic {
                 Bukkit.getPluginManager().callEvent(event);
                 items.clear();
                 items.addAll(event.getItems());
+
                 if (!event.isCancelled()) {
                     visitedPipes.add(posKey(fac));
-                    searchNearbyPipes(block, visitedPipes, items, bypassFilters);
+                    // KEY CHANGE: Pass bypass mode to search function
+                    searchNearbyPipes(block, visitedPipes, items, bypassMode);
                 }
 
                 if (!items.isEmpty()) {
@@ -778,7 +841,7 @@ public class Pipes extends AbstractCraftBookMechanic {
                 items.addAll(event.getItems());
                 if (!event.isCancelled()) {
                     visitedPipes.add(posKey(fac));
-                    searchNearbyPipes(block, visitedPipes, items, bypassFilters);
+                    searchNearbyPipes(block, visitedPipes, items, bypassMode);
                 }
 
                 if (!items.isEmpty()) {
@@ -808,7 +871,7 @@ public class Pipes extends AbstractCraftBookMechanic {
 
                     if (!event.isCancelled()) {
                         visitedPipes.add(posKey(fac));
-                        searchNearbyPipes(block, visitedPipes, items, bypassFilters);
+                        searchNearbyPipes(block, visitedPipes, items, bypassMode);
                     }
 
                     if (!items.isEmpty()) {
@@ -829,7 +892,7 @@ public class Pipes extends AbstractCraftBookMechanic {
                 items.addAll(event.getItems());
                 if (!event.isCancelled() && !items.isEmpty()) {
                     visitedPipes.add(posKey(fac));
-                    searchNearbyPipes(block, visitedPipes, items, bypassFilters);
+                    searchNearbyPipes(block, visitedPipes, items, bypassMode);
                 }
                 leftovers.addAll(items);
             }
@@ -870,12 +933,11 @@ public class Pipes extends AbstractCraftBookMechanic {
         if (pipeRequireSign && getAttachedPipeSign(event.getBlock()) == null) return;
         if (!EventUtil.passesFilter(event)) return;
 
-        // NEW: pass the hop's original source so we can return leftovers there
         Block hopReturn = event.isFromHop() ? event.getSuckedBlock() : null;
         startPipe(event.getBlock(), event.getItems(), true, hopReturn);
     }
 
-    // NEW: Cache invalidation event handlers
+    // Cache invalidation event handlers
     @EventHandler(priority = EventPriority.MONITOR)
     public void onBlockBreak(BlockBreakEvent event) {
         Block block = event.getBlock();
@@ -895,14 +957,12 @@ public class Pipes extends AbstractCraftBookMechanic {
     @EventHandler
     public void onWorldUnload(WorldUnloadEvent event) {
         World world = event.getWorld();
-        // Remove all cached data for this world to prevent memory leaks
         filterCache.entrySet().removeIf(entry ->
                 entry.getKey().getWorld().equals(world));
     }
 
-    // NEW: Helper method to clear filter cache in area
+    // Helper method to clear filter cache in area
     private void clearFilterCacheNearby(Location center) {
-        // Clear cache for the location and all adjacent blocks
         for (int x = -1; x <= 1; x++) {
             for (int y = -1; y <= 1; y++) {
                 for (int z = -1; z <= 1; z++) {
@@ -924,7 +984,7 @@ public class Pipes extends AbstractCraftBookMechanic {
         pipesDiagonal = config.getBoolean(path + "allow-diagonal", false);
 
         config.setComment(path + "insulator-block", "When pipes work diagonally, this block allows the pipe to be insulated to not work diagonally.");
-        pipeInsulator = BlockSyntax.getBlock(config.getString(path + "insulator-block", BlockTypes.WHITE_WOOL.id()), true);
+        pipeInsulator = BlockSyntax.getBlock(config.getString(path + "insulator-block", BlockTypes.WHITE_WOOL.getId()), true);
 
         config.setComment(path + "stack-per-move", "This option stops the pipes taking the entire chest on power, and makes it just take a single stack.");
         pipeStackPerPull = config.getBoolean(path + "stack-per-move", true);
