@@ -54,6 +54,7 @@ import com.sk89q.craftbook.mechanics.drops.CustomDrops;
 import com.sk89q.craftbook.mechanics.drops.legacy.LegacyCustomDrops;
 import com.sk89q.craftbook.mechanics.headdrops.HeadDrops;
 import com.sk89q.craftbook.mechanics.ic.ICMechanic;
+import com.sk89q.craftbook.mechanics.ic.gates.world.miscellaneous.*;
 import com.sk89q.craftbook.mechanics.items.CommandItemDefinition;
 import com.sk89q.craftbook.mechanics.items.CommandItems;
 import com.sk89q.craftbook.mechanics.minecart.CollisionEntry;
@@ -81,6 +82,7 @@ import com.sk89q.craftbook.mechanics.minecart.blocks.CartReverser;
 import com.sk89q.craftbook.mechanics.minecart.blocks.CartSorter;
 import com.sk89q.craftbook.mechanics.minecart.blocks.CartStation;
 import com.sk89q.craftbook.mechanics.minecart.blocks.CartTeleporter;
+
 import com.sk89q.craftbook.mechanics.pipe.Pipes;
 import com.sk89q.craftbook.mechanics.signcopier.SignCopier;
 import com.sk89q.craftbook.mechanics.variables.VariableManager;
@@ -488,6 +490,27 @@ public class CraftBookPlugin extends JavaPlugin {
             }
         }, this);
 
+        getServer().getPluginManager().registerEvents(
+                new PipeLinkBindListener(),
+                this
+        );
+        getServer().getPluginManager().registerEvents(
+                new PipeLinkTransferListener(),
+                this
+        );
+        getServer().getPluginManager().registerEvents(
+                new PipeLinkRouterListener(),
+                this
+        );
+        getServer().getPluginManager().registerEvents(
+                new PipeAllDebugListener(),
+                this
+        );
+        getServer().getPluginManager().registerEvents(new PipeLinkSuckRouterListener(), this);
+        getServer().getPluginManager().registerEvents(new PipeLinkBreakListener(), this);
+        getLogger().warning("[Pipes/DBG] PipeLinkSuckRouterListener REGISTERED " + System.currentTimeMillis());
+
+
         boolean foundAMech = false;
 
         for(CraftBookMechanic mech : mechanics)
@@ -752,6 +775,8 @@ public class CraftBookPlugin extends JavaPlugin {
 
         if(uuidMappings != null)
             uuidMappings.disable();
+
+        PipeLinkService.get().cleanup();
     }
 
     /**
